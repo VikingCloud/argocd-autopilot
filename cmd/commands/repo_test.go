@@ -15,8 +15,8 @@ import (
 	kubemocks "github.com/argoproj-labs/argocd-autopilot/pkg/kube/mocks"
 	"github.com/argoproj-labs/argocd-autopilot/pkg/store"
 
-	argocdcommon "github.com/argoproj/argo-cd/v2/common"
-	argocdv1alpha1 "github.com/argoproj/argo-cd/v2/pkg/apis/application/v1alpha1"
+	argocdcommon "github.com/argoproj/argo-cd/v3/common"
+	argocdv1alpha1 "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	"github.com/go-git/go-billy/v5/memfs"
 	billyUtils "github.com/go-git/go-billy/v5/util"
 	"github.com/golang/mock/gomock"
@@ -169,41 +169,45 @@ func Test_buildBootstrapManifests(t *testing.T) {
 				assert.Equal(t, "https://github.com/foo/bar.git", argocdApp.Spec.Source.RepoURL)
 				assert.Equal(t, filepath.Join("installation1", store.Default.BootsrtrapDir, store.Default.ArgoCDName), argocdApp.Spec.Source.Path)
 				assert.Equal(t, "main", argocdApp.Spec.Source.TargetRevision)
-				assert.Equal(t, 0, len(argocdApp.ObjectMeta.Finalizers))
+				assert.Equal(t, 0, len(argocdApp.Finalizers))
 				assert.Equal(t, "foo", argocdApp.Spec.Destination.Namespace)
 				assert.Equal(t, store.Default.DestServer, argocdApp.Spec.Destination.Server)
-				assert.Equal(t, "value", argocdApp.ObjectMeta.Labels["name"])
+				assert.Equal(t, "value", argocdApp.Labels["name"])
 
 				bootstrapApp := &argocdv1alpha1.Application{}
 				assert.NoError(t, yaml.Unmarshal(b.bootstrapApp, bootstrapApp))
 				assert.Equal(t, "https://github.com/foo/bar.git", bootstrapApp.Spec.Source.RepoURL)
 				assert.Equal(t, filepath.Join("installation1", store.Default.BootsrtrapDir), bootstrapApp.Spec.Source.Path)
 				assert.Equal(t, "main", bootstrapApp.Spec.Source.TargetRevision)
-				assert.NotEqual(t, 0, len(bootstrapApp.ObjectMeta.Finalizers))
+				assert.NotEqual(t, 0, len(bootstrapApp.Finalizers))
 				assert.Equal(t, "foo", bootstrapApp.Spec.Destination.Namespace)
 				assert.Equal(t, store.Default.DestServer, bootstrapApp.Spec.Destination.Server)
-				assert.Equal(t, "value2", bootstrapApp.ObjectMeta.Labels["name"])
+				assert.Equal(t, "value2", bootstrapApp.Labels["name"])
 
 				rootApp := &argocdv1alpha1.Application{}
 				assert.NoError(t, yaml.Unmarshal(b.rootApp, rootApp))
 				assert.Equal(t, "https://github.com/foo/bar.git", rootApp.Spec.Source.RepoURL)
 				assert.Equal(t, filepath.Join("installation1", store.Default.ProjectsDir), rootApp.Spec.Source.Path)
 				assert.Equal(t, "main", rootApp.Spec.Source.TargetRevision)
-				assert.NotEqual(t, 0, len(rootApp.ObjectMeta.Finalizers))
+				assert.NotEqual(t, 0, len(rootApp.Finalizers))
 				assert.Equal(t, "foo", rootApp.Spec.Destination.Namespace)
 				assert.Equal(t, store.Default.DestServer, rootApp.Spec.Destination.Server)
-				assert.Equal(t, "value2", rootApp.ObjectMeta.Labels["name"])
+				assert.Equal(t, "value2", rootApp.Labels["name"])
 
 				ns := &v1.Namespace{}
 				assert.NoError(t, yaml.Unmarshal(b.namespace, ns))
-				assert.Equal(t, "foo", ns.ObjectMeta.Name)
+				assert.Equal(t, "foo", ns.Name)
 
 				creds := &v1.Secret{}
 				assert.NoError(t, yaml.Unmarshal(b.repoCreds, &creds))
-				assert.Equal(t, store.Default.RepoCredsSecretName, creds.ObjectMeta.Name)
-				assert.Equal(t, "foo", creds.ObjectMeta.Namespace)
-				assert.Equal(t, []byte("test"), creds.Data["git_token"])
-				assert.Equal(t, []byte(store.Default.GitHubUsername), creds.Data["git_username"])
+				assert.Equal(t, "argocd-repo-creds", creds.Name)
+				assert.Equal(t, "foo", creds.Namespace)
+				assert.Equal(t, "repo-creds", creds.Labels["argocd.argoproj.io/secret-type"])
+				assert.Equal(t, store.Default.LabelValueManagedBy, creds.Labels[store.Default.LabelKeyAppManagedBy])
+				assert.Equal(t, "git", creds.StringData["type"])
+				assert.Equal(t, "https://github.com/", creds.StringData["url"])
+				assert.Equal(t, "test", creds.StringData["password"])
+				assert.Equal(t, store.Default.GitHubUsername, creds.StringData["username"])
 			},
 		},
 	}
@@ -401,6 +405,61 @@ func TestRunRepoBootstrap(t *testing.T) {
 
 			err := RunRepoBootstrap(context.Background(), tt.opts)
 			tt.assertFn(t, repofs, err)
+		})
+	}
+}
+
+func Test_getRepoCredsSecret(t *testing.T) {
+	tests := map[string]struct {
+		username  string
+		token     string
+		namespace string
+		repoURL   string
+		assertFn  func(t *testing.T, secret []byte, err error)
+	}{
+		"Basic GitHub": {
+			username:  "testuser",
+			token:     "testtoken",
+			namespace: "argocd",
+			repoURL:   "https://github.com/owner/repo.git",
+			assertFn: func(t *testing.T, secretBytes []byte, err error) {
+				assert.NoError(t, err)
+
+				secret := &v1.Secret{}
+				assert.NoError(t, yaml.Unmarshal(secretBytes, secret))
+				assert.Equal(t, "argocd-repo-creds", secret.Name)
+				assert.Equal(t, "argocd", secret.Namespace)
+				assert.Equal(t, "repo-creds", secret.Labels["argocd.argoproj.io/secret-type"])
+				assert.Equal(t, store.Default.LabelValueManagedBy, secret.Labels[store.Default.LabelKeyAppManagedBy])
+				assert.Equal(t, "git", secret.StringData["type"])
+				assert.Equal(t, "https://github.com/", secret.StringData["url"])
+				assert.Equal(t, "testuser", secret.StringData["username"])
+				assert.Equal(t, "testtoken", secret.StringData["password"])
+			},
+		},
+		"GitLab": {
+			username:  "gitlabuser",
+			token:     "glpat-xxxx",
+			namespace: "custom-ns",
+			repoURL:   "https://gitlab.com/group/project.git",
+			assertFn: func(t *testing.T, secretBytes []byte, err error) {
+				assert.NoError(t, err)
+
+				secret := &v1.Secret{}
+				assert.NoError(t, yaml.Unmarshal(secretBytes, secret))
+				assert.Equal(t, "argocd-repo-creds", secret.Name)
+				assert.Equal(t, "custom-ns", secret.Namespace)
+				assert.Equal(t, "https://gitlab.com/", secret.StringData["url"])
+				assert.Equal(t, "gitlabuser", secret.StringData["username"])
+				assert.Equal(t, "glpat-xxxx", secret.StringData["password"])
+			},
+		},
+	}
+
+	for tname, tt := range tests {
+		t.Run(tname, func(t *testing.T) {
+			secret, err := getRepoCredsSecret(tt.username, tt.token, tt.namespace, tt.repoURL)
+			tt.assertFn(t, secret, err)
 		})
 	}
 }
